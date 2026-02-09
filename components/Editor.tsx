@@ -1,14 +1,15 @@
 import React, { useRef, useEffect, useState } from 'react';
-import { X, Eraser, Check, Loader2, RefreshCw } from 'lucide-react';
+import { X, Eraser, Check, Loader2, RefreshCw, Undo2 } from 'lucide-react';
 import { GeneratedAsset } from '../types';
 
 interface EditorProps {
   asset: GeneratedAsset;
   onClose: () => void;
   onRefine: (assetId: string, mask: string, instruction: string) => Promise<void>;
+  onUndo: () => void;
 }
 
-const Editor: React.FC<EditorProps> = ({ asset, onClose, onRefine }) => {
+const Editor: React.FC<EditorProps> = ({ asset, onClose, onRefine, onUndo }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [isDrawing, setIsDrawing] = useState(false);
@@ -17,100 +18,9 @@ const Editor: React.FC<EditorProps> = ({ asset, onClose, onRefine }) => {
   const [brushSize, setBrushSize] = useState(20);
 
   // Initialize canvas with image
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    const img = new Image();
-    img.crossOrigin = "anonymous";
-    img.src = asset.imageUrl;
-
-    img.onload = () => {
-      // Fit canvas to screen while maintaining aspect ratio
-      const maxWidth = window.innerWidth * 0.8;
-      const maxHeight = window.innerHeight * 0.6;
-      let width = img.width;
-      let height = img.height;
-
-      const ratio = Math.min(maxWidth / width, maxHeight / height);
-      canvas.width = width * ratio;
-      canvas.height = height * ratio;
-
-      // Draw original image
-      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-    };
-  }, [asset]);
-
-  const startDrawing = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    setIsDrawing(true);
-    draw(e);
-  };
-
-  const stopDrawing = () => {
-    setIsDrawing(false);
-    const canvas = canvasRef.current;
-    if(canvas) {
-        const ctx = canvas.getContext('2d');
-        if(ctx) ctx.beginPath(); // Reset path
-    }
-  };
-
-  const draw = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!isDrawing) return;
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    const rect = canvas.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-
-    ctx.lineWidth = brushSize;
-    ctx.lineCap = 'round';
-    // Visual feedback for the user (white semi-transparent)
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.7)'; 
-    
-    ctx.lineTo(x, y);
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.moveTo(x, y);
-  };
-
-  const handleSubmit = async () => {
-    if (!instruction.trim()) return;
-    
-    setIsProcessing(true);
-    
-    // Create the mask
-    // We need a separate canvas that is purely black (bg) and white (drawings)
-    // or transparent and white. Gemini usually expects the mask to be the white area.
-    const canvas = canvasRef.current;
-    if(!canvas) return;
-
-    const maskCanvas = document.createElement('canvas');
-    maskCanvas.width = canvas.width;
-    maskCanvas.height = canvas.height;
-    const maskCtx = maskCanvas.getContext('2d');
-    if(!maskCtx) return;
-
-    // Fill black
-    maskCtx.fillStyle = '#000000';
-    maskCtx.fillRect(0, 0, maskCanvas.width, maskCanvas.height);
-
-    // Re-draw the user's strokes based on the "visual" canvas
-    // Since we drew directly on the image, extracting *just* the strokes is hard 
-    // unless we used a second layer. 
-    // CORRECT APPROACH: Use a second canvas layer for drawing in the UI, keeping the image separate.
-    // For this simple implementation, I will assume the user has drawn on the main canvas 
-    // and I can't easily separate it without a layer system.
-    // FIX: Let's reimplement with a proper layer system right now.
-  };
+  // Note: We don't draw the image on the main canvas anymore in this new architecture,
+  // we use the EditorCanvas sub-component which handles layers.
   
-  // Re-render logic for layers
   return (
       <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/90 backdrop-blur-sm">
           <div className="w-full max-w-5xl bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl overflow-hidden flex flex-col h-[90vh]">
@@ -134,12 +44,17 @@ const Editor: React.FC<EditorProps> = ({ asset, onClose, onRefine }) => {
                         // Pass mask data to handler
                         if(instruction && !isProcessing) {
                             setIsProcessing(true);
-                            onRefine(asset.id, maskData, instruction).finally(() => setIsProcessing(false));
+                            onRefine(asset.id, maskData, instruction).finally(() => {
+                                setIsProcessing(false);
+                                setInstruction(''); // Clear instruction after refine
+                            });
                         }
                     }}
                     instruction={instruction}
                     setInstruction={setInstruction}
                     isProcessing={isProcessing}
+                    hasHistory={asset.history.length > 0}
+                    onUndo={onUndo}
                   />
               </div>
 
@@ -176,7 +91,9 @@ const EditorCanvas: React.FC<{
     instruction: string;
     setInstruction: (s: string) => void;
     isProcessing: boolean;
-}> = ({ imageUrl, brushSize, onExportMask, instruction, setInstruction, isProcessing }) => {
+    hasHistory: boolean;
+    onUndo: () => void;
+}> = ({ imageUrl, brushSize, onExportMask, instruction, setInstruction, isProcessing, hasHistory, onUndo }) => {
     const containerRef = useRef<HTMLDivElement>(null);
     const imageRef = useRef<HTMLImageElement>(null);
     const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -203,8 +120,11 @@ const EditorCanvas: React.FC<{
         if(canvas && dimensions.w > 0) {
             canvas.width = dimensions.w;
             canvas.height = dimensions.h;
+            // Clear canvas when image changes (e.g. after undo or refine)
+            const ctx = canvas.getContext('2d');
+            ctx?.clearRect(0,0, canvas.width, canvas.height);
         }
-    }, [dimensions]);
+    }, [dimensions, imageUrl]);
 
     const getMousePos = (e: React.MouseEvent) => {
         const canvas = canvasRef.current;
@@ -257,16 +177,8 @@ const EditorCanvas: React.FC<{
         ctx.fillRect(0,0, dimensions.w, dimensions.h);
 
         // Draw the strokes from the visual canvas onto the mask canvas
-        // But wait, the visual canvas has the image underneath? No, it's a layer on top.
-        // The visual canvas (canvasRef) ONLY has the strokes on it because the image is in an <img> tag behind it.
-        // However, the strokes are semi-transparent white. We need them fully white for the mask.
-        
         const visualData = canvasRef.current?.getContext('2d')?.getImageData(0,0, dimensions.w, dimensions.h);
         if(visualData) {
-            // We can iterate pixels, or just draw the canvas with a composite operation.
-            // Simpler: Just rely on the user drawing.
-            // Actually, since I drew with rgba(255,255,255,0.5), I need to threshold it to solid white.
-            
             const imageData = ctx.createImageData(dimensions.w, dimensions.h);
             const sourceData = visualData.data;
             const destData = imageData.data;
@@ -314,8 +226,20 @@ const EditorCanvas: React.FC<{
             </div>
             
             {/* Input Overlay */}
-            <div className="absolute bottom-6 w-full max-w-2xl px-4">
-                <div className="flex gap-2 bg-slate-800/90 p-2 rounded-xl backdrop-blur-md border border-slate-700 shadow-xl">
+            <div className="absolute bottom-6 w-full max-w-2xl px-4 flex gap-2">
+                {/* Undo Button */}
+                {hasHistory && (
+                    <button 
+                        onClick={onUndo}
+                        disabled={isProcessing}
+                        className="p-3 rounded-xl bg-slate-800/90 border border-slate-700 hover:bg-slate-700 text-white shadow-xl transition-colors"
+                        title="Undo Last Change"
+                    >
+                        <Undo2 size={20} />
+                    </button>
+                )}
+                
+                <div className="flex-1 flex gap-2 bg-slate-800/90 p-2 rounded-xl backdrop-blur-md border border-slate-700 shadow-xl">
                     <input
                         type="text"
                         value={instruction}

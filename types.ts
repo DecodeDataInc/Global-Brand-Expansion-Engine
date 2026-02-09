@@ -1,3 +1,4 @@
+
 export interface BrandDNA {
   palette: string[];
   style: string;
@@ -6,15 +7,29 @@ export interface BrandDNA {
   description: string;
 }
 
+export type AssetType = 
+  | 'T-Shirt' 
+  | 'Cap' 
+  | 'Billboard' 
+  | 'Poster' 
+  | 'Mug' 
+  | 'Tote'
+  | 'Vertical Video'
+  | 'Horizontal Video'
+  | 'Influencer Post'
+  | 'Square Logo';
+
+export type MediaType = 'image' | 'video';
+
 export interface GeneratedAsset {
   id: string;
-  category: string;
-  imageUrl: string;
+  category: AssetType;
+  imageUrl: string; // Used for both image and video URLs
+  mediaType: MediaType;
+  history: string[]; // Stores previous URLs for undo
   prompt: string;
   timestamp: number;
 }
-
-export type AssetType = 'T-Shirt' | 'Cap' | 'Billboard' | 'Poster' | 'Mug' | 'Tote';
 
 export interface EditorState {
   isOpen: boolean;

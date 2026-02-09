@@ -1,0 +1,14 @@
+{
+  "deployment_targets": [
+    {
+      "environment": "production",
+      "bucket": "gs://global-brand-expansion-prod",
+      "region": "us-central1"
+    },
+    {
+      "environment": "staging",
+      "bucket": "gs://global-brand-expansion-staging",
+      "region": "us-central1"
+    }
+  ]
+}

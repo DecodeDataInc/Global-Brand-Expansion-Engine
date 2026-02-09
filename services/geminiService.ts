@@ -1,5 +1,5 @@
 import { GoogleGenAI, Type } from "@google/genai";
-import { BrandDNA } from "../types";
+import { BrandDNA, AssetType } from "../types";
 import { stripBase64Prefix } from "../utils";
 
 // Helper to ensure we get a fresh instance with the selected key
@@ -54,12 +54,22 @@ export const analyzeBrandDNA = async (base64Image: string): Promise<BrandDNA> =>
 };
 
 export const generateBrandAsset = async (
-  assetType: string,
-  dna: BrandDNA
-): Promise<string> => {
+  assetType: AssetType,
+  dna: BrandDNA,
+  theme?: string
+): Promise<{ url: string, mediaType: 'image' | 'video' }> => {
+  
+  // Route to video generation if needed
+  if (assetType === 'Vertical Video' || assetType === 'Horizontal Video') {
+    const videoUrl = await generateBrandVideo(assetType, dna, theme);
+    return { url: videoUrl, mediaType: 'video' };
+  }
+
   const ai = getAIClient();
 
   let itemPrompt = "";
+  let aspectRatio = "1:1";
+
   switch (assetType) {
     case 'T-Shirt':
       itemPrompt = "A high-quality cotton t-shirt presented flat-lay or on a ghost mannequin";
@@ -69,9 +79,11 @@ export const generateBrandAsset = async (
       break;
     case 'Billboard':
       itemPrompt = "A massive outdoor billboard mockup in a busy city environment";
+      aspectRatio = "4:3";
       break;
     case 'Poster':
       itemPrompt = "A sleek vertical poster framed in a modern subway station or gallery wall";
+      aspectRatio = "3:4";
       break;
     case 'Mug':
       itemPrompt = "A ceramic coffee mug with a matte finish on a wooden table";
@@ -79,12 +91,23 @@ export const generateBrandAsset = async (
     case 'Tote':
       itemPrompt = "A natural canvas tote bag hanging on a hook or placed on a bench";
       break;
+    case 'Influencer Post':
+      itemPrompt = "A professional fashion influencer lifestyle shot wearing the brand merchandise or interacting with the product in a trendy urban setting";
+      aspectRatio = "3:4";
+      break;
+    case 'Square Logo':
+      itemPrompt = "A polished, high-resolution square logo presentation, suitable for social media profiles or app icons, centered on a neutral or brand-color background";
+      aspectRatio = "1:1";
+      break;
     default:
       itemPrompt = `A premium ${assetType} product mockup`;
   }
 
+  const themeContext = theme ? `\nCONTEXTUAL THEME: The asset must be themed around "${theme}" (e.g. season, event, or mood) while strictly maintaining the core brand identity defined below.` : "";
+
   const prompt = `
     Create a photorealistic 4K product mockup for: ${itemPrompt}.
+    ${themeContext}
     
     Apply this Brand DNA exactly:
     - Logo/Graphic Source: ${dna.description}
@@ -102,7 +125,7 @@ export const generateBrandAsset = async (
     config: {
       imageConfig: {
         imageSize: '4K',
-        aspectRatio: '1:1' 
+        aspectRatio: aspectRatio
       }
     }
   });
@@ -114,8 +137,52 @@ export const generateBrandAsset = async (
     throw new Error("No image generated");
   }
 
-  return `data:image/png;base64,${imagePart.inlineData.data}`;
+  return { 
+    url: `data:image/png;base64,${imagePart.inlineData.data}`,
+    mediaType: 'image'
+  };
 };
+
+const generateBrandVideo = async (assetType: 'Vertical Video' | 'Horizontal Video', dna: BrandDNA, theme?: string): Promise<string> => {
+  const ai = getAIClient();
+  const isVertical = assetType === 'Vertical Video';
+  
+  const themeContext = theme ? `The video should featured a specific theme: "${theme}".` : "";
+
+  const prompt = `
+    Cinematic, high-energy ${isVertical ? 'vertical' : 'horizontal'} commercial video for a brand with style: ${dna.style}.
+    ${themeContext}
+    Key colors: ${dna.palette.join(", ")}.
+    Visuals: Abstract motion graphics, flowing fabrics, or lifestyle scenes reflecting the brand keywords: ${dna.keywords.join(", ")}.
+    The video should be sleek, modern, and loopable.
+  `;
+
+  let operation = await ai.models.generateVideos({
+    model: 'veo-3.1-fast-generate-preview',
+    prompt: prompt,
+    config: {
+      numberOfVideos: 1,
+      resolution: '1080p',
+      aspectRatio: isVertical ? '9:16' : '16:9'
+    }
+  });
+
+  // Poll for completion
+  while (!operation.done) {
+    await new Promise(resolve => setTimeout(resolve, 5000)); // Poll every 5s
+    operation = await ai.operations.getVideosOperation({operation: operation});
+  }
+
+  const downloadLink = operation.response?.generatedVideos?.[0]?.video?.uri;
+  if (!downloadLink) throw new Error("Video generation failed to return a URI");
+
+  // Fetch the video to create a blob URL (avoids exposing API key in DOM)
+  const videoRes = await fetch(`${downloadLink}&key=${process.env.API_KEY}`);
+  if (!videoRes.ok) throw new Error("Failed to download generated video");
+  
+  const blob = await videoRes.blob();
+  return URL.createObjectURL(blob);
+}
 
 export const refineAsset = async (
   originalImageUrl: string,

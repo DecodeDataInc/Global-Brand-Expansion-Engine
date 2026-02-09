@@ -11,7 +11,9 @@ import {
   ChevronDown,
   ChevronRight,
   Minus,
-  Download
+  Download,
+  Video,
+  Image as ImageIcon
 } from 'lucide-react';
 import JSZip from 'jszip';
 
@@ -20,14 +22,6 @@ import Editor from './components/Editor';
 import { BrandDNA, GeneratedAsset, AssetType } from './types';
 import { analyzeBrandDNA, generateBrandAsset, refineAsset } from './services/geminiService';
 import { fileToBase64 } from './utils';
-
-// Declare global types for AI Studio
-declare global {
-  interface AIStudio {
-    hasSelectedApiKey(): Promise<boolean>;
-    openSelectKey(): Promise<void>;
-  }
-}
 
 interface CategoryGroup {
   id: string;
@@ -59,6 +53,16 @@ const CATEGORY_GROUPS: CategoryGroup[] = [
       { id: 'Mug', label: 'Mug' },
       { id: 'Tote', label: 'Tote' }
     ]
+  },
+  {
+    id: 'Digital',
+    label: 'Digital Assets',
+    items: [
+      { id: 'Square Logo', label: 'Square Logo (1:1)' },
+      { id: 'Influencer Post', label: 'Influencer Post (3:4)' },
+      // { id: 'Vertical Video', label: 'Vertical Video (9:16)' },
+      // { id: 'Horizontal Video', label: 'Horizontal Video (16:9)' }
+    ]
   }
 ];
 
@@ -72,6 +76,9 @@ function App() {
   // Selection State
   const [selectedItems, setSelectedItems] = useState<Set<string>>(new Set(['T-Shirt']));
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set(['Apparel']));
+  
+  // Theme State
+  const [themePrompt, setThemePrompt] = useState('');
 
   const [generatedAssets, setGeneratedAssets] = useState<GeneratedAsset[]>([]);
   
@@ -128,17 +135,19 @@ function App() {
     setStatus('generating');
     try {
       const results: GeneratedAsset[] = [];
-      const itemsToGenerate = Array.from(selectedItems);
+      const itemsToGenerate = Array.from(selectedItems) as AssetType[];
       
       // Parallel generation for each selected item
       await Promise.all(itemsToGenerate.map(async (itemType) => {
         try {
-          const imgBase64 = await generateBrandAsset(itemType, brandDNA);
+          const { url, mediaType } = await generateBrandAsset(itemType, brandDNA, themePrompt);
           results.push({
             id: crypto.randomUUID(),
             category: itemType,
-            imageUrl: imgBase64,
-            prompt: `Generating ${itemType}...`,
+            imageUrl: url,
+            mediaType: mediaType,
+            history: [],
+            prompt: `Generating ${itemType} ${themePrompt ? `(${themePrompt})` : ''}...`,
             timestamp: Date.now()
           });
         } catch (err) {
@@ -191,24 +200,61 @@ function App() {
 
   const handleRefine = async (assetId: string, mask: string, instruction: string) => {
     const asset = generatedAssets.find(a => a.id === assetId);
-    if (!asset) return;
+    if (!asset || asset.mediaType === 'video') return;
 
     try {
       const newImageBase64 = await refineAsset(asset.imageUrl, mask, instruction);
+      
       setGeneratedAssets(prev => prev.map(a => 
-        a.id === assetId ? { ...a, imageUrl: newImageBase64 } : a
+        a.id === assetId ? { 
+          ...a, 
+          history: [...a.history, a.imageUrl], // Save current to history
+          imageUrl: newImageBase64 
+        } : a
       ));
-      setEditingAsset(null);
+      
+      // Update editing asset so the editor sees the new image immediately
+      // We need to fetch the updated asset from the state update, but here we can just construct it
+      setEditingAsset(prev => prev ? {
+          ...prev,
+          history: [...prev.history, prev.imageUrl],
+          imageUrl: newImageBase64
+      } : null);
+
     } catch (e: any) {
       alert("Refinement failed: " + e.message);
     }
+  };
+
+  const handleUndo = () => {
+    if (!editingAsset || editingAsset.history.length === 0) return;
+
+    const previousUrl = editingAsset.history[editingAsset.history.length - 1];
+    const newHistory = editingAsset.history.slice(0, -1);
+
+    // Update global state
+    setGeneratedAssets(prev => prev.map(a => 
+      a.id === editingAsset.id ? { 
+        ...a, 
+        imageUrl: previousUrl, 
+        history: newHistory
+      } : a
+    ));
+
+    // Update local editor state
+    setEditingAsset(prev => prev ? {
+        ...prev,
+        imageUrl: previousUrl,
+        history: newHistory
+    } : null);
   };
 
   const handleDownload = (asset: GeneratedAsset, e: React.MouseEvent) => {
     e.stopPropagation();
     const link = document.createElement('a');
     link.href = asset.imageUrl;
-    link.download = `brand-kit-${asset.category}-${asset.id.slice(0, 4)}.png`;
+    const ext = asset.mediaType === 'video' ? 'mp4' : 'png';
+    link.download = `brand-kit-${asset.category.replace(/\s+/g, '-')}-${asset.id.slice(0, 4)}.${ext}`;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -222,13 +268,20 @@ function App() {
       const zip = new JSZip();
       const folder = zip.folder("Global_Brand_Expansion_Kit");
 
-      generatedAssets.forEach((asset) => {
-        // Strip the data URL prefix to get raw base64
-        const base64Data = asset.imageUrl.split(',')[1];
-        if (base64Data) {
-          folder?.file(`${asset.category}-${asset.id.slice(0, 4)}.png`, base64Data, { base64: true });
+      for (const asset of generatedAssets) {
+        if (asset.mediaType === 'image') {
+          // Strip the data URL prefix to get raw base64
+          const base64Data = asset.imageUrl.split(',')[1];
+          if (base64Data) {
+            folder?.file(`${asset.category}-${asset.id.slice(0, 4)}.png`, base64Data, { base64: true });
+          }
+        } else if (asset.mediaType === 'video') {
+            // For Blob URLs, we need to fetch the data
+            const response = await fetch(asset.imageUrl);
+            const blob = await response.blob();
+            folder?.file(`${asset.category}-${asset.id.slice(0, 4)}.mp4`, blob);
         }
-      });
+      }
 
       const content = await zip.generateAsync({ type: "blob" });
       const link = document.createElement('a');
@@ -397,6 +450,21 @@ function App() {
               </div>
             )}
           </div>
+          
+          {/* Theme Input */}
+          <div className="bg-[#131722] rounded-xl p-4 border border-slate-800/60 shadow-lg">
+             <div className="flex items-center gap-2 mb-2 text-slate-400">
+                  <Sparkles size={14} className="text-amber-400"/>
+                  <span className="text-xs font-semibold uppercase tracking-wider">Campaign Theme (Optional)</span>
+             </div>
+             <input
+                type="text"
+                value={themePrompt}
+                onChange={(e) => setThemePrompt(e.target.value)}
+                placeholder="e.g. Superbowl, Christmas, Cyberpunk..."
+                className="w-full bg-[#0B0F17] border border-slate-700/50 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-indigo-500 transition-all"
+             />
+          </div>
 
         </div>
 
@@ -405,7 +473,7 @@ function App() {
           {/* API Key Warning */}
           {!apiKeyReady && (
              <div onClick={handleSelectKey} className="mb-4 text-xs text-amber-500 cursor-pointer hover:underline flex items-center gap-1">
-               <AlertCircle size={12}/> <span>Connect API Key to enable generation</span>
+               <AlertCircle size={12}/> <span>Test API Key connected to enable generation. Avaliable for a limited time.</span>
              </div>
           )}
 
@@ -464,22 +532,41 @@ function App() {
                   <div 
                     key={asset.id} 
                     className="group relative bg-[#0B0F17] rounded-xl overflow-hidden cursor-pointer transition-all duration-300 hover:ring-2 hover:ring-indigo-500/50 hover:shadow-2xl hover:shadow-indigo-500/10"
-                    onClick={() => setEditingAsset(asset)}
+                    onClick={() => asset.mediaType === 'image' && setEditingAsset(asset)}
                   >
-                    <div className="aspect-square relative overflow-hidden">
-                        <img 
-                            src={asset.imageUrl} 
-                            alt={asset.category} 
-                            className="w-full h-full object-cover transform group-hover:scale-105 transition-transform duration-700"
-                        />
+                    <div className="aspect-square relative overflow-hidden bg-black flex items-center justify-center">
+                        {asset.mediaType === 'video' ? (
+                          <div className="relative w-full h-full flex items-center justify-center">
+                             <video 
+                                src={asset.imageUrl} 
+                                className="w-full h-full object-cover opacity-80 group-hover:opacity-100 transition-opacity" 
+                                muted 
+                                loop 
+                                onMouseOver={e => e.currentTarget.play()} 
+                                onMouseOut={e => e.currentTarget.pause()}
+                             />
+                             <div className="absolute top-2 right-2 bg-black/60 p-1.5 rounded-full backdrop-blur-sm pointer-events-none">
+                                <Video size={14} className="text-white"/>
+                             </div>
+                          </div>
+                        ) : (
+                          <img 
+                              src={asset.imageUrl} 
+                              alt={asset.category} 
+                              className="w-full h-full object-cover transform group-hover:scale-105 transition-transform duration-700"
+                          />
+                        )}
+                        
                          {/* Hover Edit/Download Prompt */}
                         <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity bg-black/60 backdrop-blur-[2px] gap-3">
-                            <button 
-                              className="bg-white hover:bg-indigo-50 text-slate-900 px-4 py-2 rounded-full font-bold text-xs shadow-xl transform scale-95 group-hover:scale-100 transition-all flex items-center gap-2"
-                              title="Refine Asset"
-                            >
-                                <Sparkles size={14}/> Refine
-                            </button>
+                            {asset.mediaType === 'image' && (
+                              <button 
+                                className="bg-white hover:bg-indigo-50 text-slate-900 px-4 py-2 rounded-full font-bold text-xs shadow-xl transform scale-95 group-hover:scale-100 transition-all flex items-center gap-2"
+                                title="Refine Asset"
+                              >
+                                  <Sparkles size={14}/> Refine
+                              </button>
+                            )}
                             <button 
                               onClick={(e) => handleDownload(asset, e)}
                               className="bg-slate-800 hover:bg-slate-700 text-white px-3 py-2 rounded-full shadow-xl transform scale-95 group-hover:scale-100 transition-all border border-slate-600"
@@ -514,6 +601,7 @@ function App() {
             asset={editingAsset} 
             onClose={() => setEditingAsset(null)}
             onRefine={handleRefine}
+            onUndo={handleUndo}
         />
       )}
     </div>
